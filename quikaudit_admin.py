@@ -7,6 +7,7 @@ from datetime import datetime
 
 MONGODB_URI = st.secrets["MONGODB_URI"]
 MARIADB_URI = st.secrets["MARIADB_URI"]
+APP_PASSWORD = st.secrets["APP_PASSWORD"]
 
 ORGANIZATIONS = {
     "Thrive Fashion Pvt. Ltd": "org_7779bed0-0aab-4508-904f-eafc3d22c8ff",
@@ -50,6 +51,23 @@ def get_mariadb_conn():
 # ─── PAGE ─────────────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="QuikAudit Admin", page_icon="🧵", layout="wide")
+
+# ─── AUTH ─────────────────────────────────────────────────────────────────────
+
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+if not st.session_state.authenticated:
+    st.title("🧵 QuikAudit Admin")
+    st.markdown("Please enter the password to continue.")
+    pwd = st.text_input("Password", type="password", key="login_pwd")
+    if st.button("Login", type="primary"):
+        if pwd == APP_PASSWORD:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    st.stop()
 st.title("🧵 QuikAudit Admin Panel")
 st.caption("Manage master data for Thrive Fashion and Caesar Industries")
 
@@ -60,6 +78,10 @@ org_name = st.sidebar.selectbox("Organisation", list(ORGANIZATIONS.keys()))
 org_id = ORGANIZATIONS[org_name]
 st.sidebar.markdown("---")
 st.sidebar.markdown(f"**Org ID:**\n`{org_id}`")
+st.sidebar.markdown("---")
+if st.sidebar.button("🚪 Sign Out"):
+    st.session_state.authenticated = False
+    st.rerun()
 
 # ─── MAIN TABS ────────────────────────────────────────────────────────────────
 
