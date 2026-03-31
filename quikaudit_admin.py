@@ -272,7 +272,8 @@ with main_tab2:
                                 ))
 
                             conn.commit()
-                            st.success(f"✅ Job worker '{jw_name}' added successfully (ID: {new_id}) and linked to {org_name}.")
+                            st.success(f"✅ Job worker added successfully (ID: {new_id}) and linked to {org_name}.")
+                            st.rerun()
 
                 except Exception as e:
                     st.error(f"Database error: {str(e)}")
