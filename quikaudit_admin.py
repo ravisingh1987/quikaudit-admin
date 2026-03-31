@@ -27,6 +27,9 @@ COLLECTIONS = {
 
 JOB_WORKER_TYPES = {"Outsource": 1, "In_House": 2}
 JOB_WORKER_ROLES = {"Cutting": 1, "Printing": 2, "Embroidery": 3, "Stitching": 4, "Checking": 5, "Ironing": 6, "Packing": 7}
+ADDRESS_TYPES = {"OFFICE": 1, "LOCAL": 2}
+PHONE_TYPE_ID = 1   # Only 'Office' exists
+EMAIL_TYPE_ID = 1   # Only 'OFFICE' exists
 
 # ─── DB CONNECTIONS ───────────────────────────────────────────────────────────
 
@@ -36,9 +39,7 @@ def get_mongo_db():
     return client["organization_db"]
 
 def get_mariadb_conn():
-    uri = MARIADB_URI
-    # Parse mysql+pymysql://user:pass@host/db
-    uri = uri.replace("mysql+pymysql://", "")
+    uri = MARIADB_URI.replace("mysql+pymysql://", "")
     user_pass, rest = uri.split("@")
     user, password = user_pass.split(":")
     host_db = rest.split("/")
@@ -163,37 +164,63 @@ with main_tab1:
 
 with main_tab2:
     st.subheader(f"Job Workers for {org_name}")
-
     jw_tab1, jw_tab2 = st.tabs(["➕ Add Job Worker", "📋 View Job Workers"])
 
     with jw_tab1:
-        st.markdown("Fill in the details to add a new job worker.")
+        st.markdown("#### Basic Details")
+        col1, col2 = st.columns(2)
+        with col1:
+            jw_name = st.text_input("Job Worker Name *", key="jw_name")
+            jw_type = st.selectbox("Type *", list(JOB_WORKER_TYPES.keys()), key="jw_type")
+            jw_role = st.selectbox("Role *", list(JOB_WORKER_ROLES.keys()), key="jw_role")
+        with col2:
+            jw_custom_id = st.text_input("Custom ID * (short unique code, no spaces e.g. MPNA)", key="jw_custom_id")
+            jw_capacity = st.number_input("Capacity", min_value=0, value=0, key="jw_capacity")
+            jw_gst = st.text_input("GST Number (optional)", key="jw_gst")
+            jw_description = st.text_input("Description (optional)", key="jw_description")
 
-        jw_name = st.text_input("Job Worker Name", key="jw_name")
-        jw_custom_id = st.text_input("Custom ID (short unique code, e.g. MPNA)", key="jw_custom_id")
-        jw_type = st.selectbox("Type", list(JOB_WORKER_TYPES.keys()), key="jw_type")
-        jw_role = st.selectbox("Role", list(JOB_WORKER_ROLES.keys()), key="jw_role")
-        jw_capacity = st.number_input("Capacity", min_value=0, value=0, key="jw_capacity")
-        jw_gst = st.text_input("GST Number (optional)", key="jw_gst")
+        st.markdown("#### Contact Details (optional but appears on challan)")
+        col3, col4 = st.columns(2)
+        with col3:
+            jw_phone = st.text_input("Phone Number", key="jw_phone")
+        with col4:
+            jw_email = st.text_input("Email", key="jw_email")
 
+        st.markdown("#### Address (optional but appears on challan)")
+        col5, col6 = st.columns(2)
+        with col5:
+            jw_addr_line1 = st.text_input("Address Line 1", key="jw_addr1")
+            jw_addr_city = st.text_input("City", key="jw_city")
+            jw_addr_country = st.text_input("Country", key="jw_country", value="India")
+        with col6:
+            jw_addr_line2 = st.text_input("Address Line 2 (optional)", key="jw_addr2")
+            jw_addr_state = st.text_input("State", key="jw_state")
+            jw_addr_pin = st.text_input("PIN Code", key="jw_pin")
+            jw_addr_type = st.selectbox("Address Type", list(ADDRESS_TYPES.keys()), key="jw_addr_type")
+
+        st.markdown("---")
         if st.button("Add Job Worker", type="primary", key="jw_add_btn"):
             if not jw_name.strip():
-                st.error("Name cannot be empty.")
+                st.error("Name is required.")
             elif not jw_custom_id.strip():
-                st.error("Custom ID cannot be empty.")
+                st.error("Custom ID is required.")
+            elif " " in jw_custom_id.strip():
+                st.error("Custom ID cannot contain spaces. Use something like MPNA or MAPRNT.")
             else:
                 try:
                     conn = get_mariadb_conn()
                     with conn.cursor() as cursor:
-                        # Check if custom_id already exists
+                        # Check duplicate custom_id
                         cursor.execute("SELECT job_worker_id FROM job_workers WHERE custom_id = %s", (jw_custom_id.strip(),))
                         if cursor.fetchone():
                             st.error(f"Custom ID '{jw_custom_id}' already exists. Choose a different one.")
                         else:
-                            # Insert into job_workers
+                            now = datetime.utcnow()
+
+                            # 1. Insert job worker
                             cursor.execute("""
-                                INSERT INTO job_workers (name, custom_id, type_id, role_id, capacity, gst, created_at, updated_at)
-                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                INSERT INTO job_workers (name, custom_id, type_id, role_id, capacity, gst, pin_code, description, created_at, updated_at)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                             """, (
                                 jw_name.strip(),
                                 jw_custom_id.strip(),
@@ -201,19 +228,52 @@ with main_tab2:
                                 JOB_WORKER_ROLES[jw_role],
                                 jw_capacity,
                                 jw_gst.strip() if jw_gst.strip() else None,
-                                datetime.utcnow(),
-                                datetime.utcnow()
+                                jw_addr_pin.strip() if jw_addr_pin.strip() else None,
+                                jw_description.strip() if jw_description.strip() else None,
+                                now, now
                             ))
                             new_id = cursor.lastrowid
 
-                            # Link to organisation
+                            # 2. Link to organisation
                             cursor.execute("""
                                 INSERT INTO job_worker_organization (job_worker_id, organization_id, assigned_at, is_active)
                                 VALUES (%s, %s, %s, %s)
-                            """, (new_id, org_id, datetime.utcnow(), 1))
+                            """, (new_id, org_id, now, 1))
+
+                            # 3. Add phone if provided
+                            if jw_phone.strip():
+                                cursor.execute("""
+                                    INSERT INTO job_worker_phones (job_worker_id, phone, type_id, created_at)
+                                    VALUES (%s, %s, %s, %s)
+                                """, (new_id, jw_phone.strip(), PHONE_TYPE_ID, now))
+
+                            # 4. Add email if provided
+                            if jw_email.strip():
+                                cursor.execute("""
+                                    INSERT INTO job_worker_emails (job_worker_id, email, type_id, created_at)
+                                    VALUES (%s, %s, %s, %s)
+                                """, (new_id, jw_email.strip(), EMAIL_TYPE_ID, now))
+
+                            # 5. Add address if line1 provided
+                            if jw_addr_line1.strip():
+                                cursor.execute("""
+                                    INSERT INTO job_worker_addresses (job_worker_id, address_line1, address_line2, city, state, country, pin_code, type_id, created_at, updated_at)
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                """, (
+                                    new_id,
+                                    jw_addr_line1.strip(),
+                                    jw_addr_line2.strip() if jw_addr_line2.strip() else None,
+                                    jw_addr_city.strip() if jw_addr_city.strip() else None,
+                                    jw_addr_state.strip() if jw_addr_state.strip() else None,
+                                    jw_addr_country.strip() if jw_addr_country.strip() else None,
+                                    jw_addr_pin.strip() if jw_addr_pin.strip() else None,
+                                    ADDRESS_TYPES[jw_addr_type],
+                                    now, now
+                                ))
 
                             conn.commit()
-                            st.success(f"Job worker '{jw_name}' added successfully with ID {new_id} and linked to {org_name}.")
+                            st.success(f"✅ Job worker '{jw_name}' added successfully (ID: {new_id}) and linked to {org_name}.")
+
                 except Exception as e:
                     st.error(f"Database error: {str(e)}")
                 finally:
@@ -224,9 +284,9 @@ with main_tab2:
             conn = get_mariadb_conn()
             with conn.cursor() as cursor:
                 cursor.execute("""
-                    SELECT jw.job_worker_id, jw.name, jw.custom_id, 
+                    SELECT jw.job_worker_id, jw.name, jw.custom_id,
                            jwt.type_name, jwr.role_name, jw.capacity,
-                           jwo.is_active
+                           jw.gst, jwo.is_active
                     FROM job_workers jw
                     JOIN job_worker_organization jwo ON jw.job_worker_id = jwo.job_worker_id
                     JOIN job_worker_type jwt ON jw.type_id = jwt.id
@@ -242,7 +302,7 @@ with main_tab2:
                 st.caption(f"{len(rows)} job workers found")
                 import pandas as pd
                 df = pd.DataFrame(rows)
-                df.columns = ["ID", "Name", "Custom ID", "Type", "Role", "Capacity", "Active"]
+                df.columns = ["ID", "Name", "Custom ID", "Type", "Role", "Capacity", "GST", "Active"]
                 df["Active"] = df["Active"].map({1: "✅ Yes", 0: "❌ No"})
                 st.dataframe(df, use_container_width=True)
         except Exception as e:
