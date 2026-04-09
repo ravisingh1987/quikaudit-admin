@@ -493,7 +493,7 @@ with main_tab3:
                         "design": design,
                         "journey": journey
                     })
-                    all_stuck_ids.extend([s["tracking_id"] for s in journey if s["status_id"] == 1])
+                    all_stuck_ids.extend([s["tracking_id"] for s in journey if str(s["status_id"]) == '1'])
                 st.session_state["journey_data"] = all_journey
                 st.session_state["journey_stuck_ids"] = all_stuck_ids
                 st.session_state["journey_design_ids"] = [d["design_id"] for d in designs]
@@ -504,7 +504,7 @@ with main_tab3:
             for item in st.session_state["journey_data"]:
                 design = item["design"]
                 journey = item["journey"]
-                stuck = [s for s in journey if s["status_id"] == 1]
+                stuck = [s for s in journey if str(s["status_id"]) == '1']
 
                 with st.expander(
                     f"{'🔴' if stuck else '✅'} {design['design_name']} | Status: {design['status']} | Order Qty: {design['quantity']} | {'⚠️ ' + str(len(stuck)) + ' stuck dept(s)' if stuck else 'All clear'}",
@@ -528,7 +528,7 @@ with main_tab3:
                             "To": step["current_dept"],
                             "Qty Transferred": step["total_qty"],
                             "Note": qty_diff,
-                            "Status": "✅ COMPLETED" if step["status_id"] == 2 else "🔴 IN PROGRESS",
+                            "Status": "✅ COMPLETED" if str(step["status_id"]) == '2' else "🔴 IN PROGRESS",
                             "Date": str(step["processed_date"])
                         })
                         prev_qty = step["total_qty"]
