@@ -496,6 +496,7 @@ with main_tab3:
                     all_stuck_ids.extend([s["tracking_id"] for s in journey if s["status_id"] == 1])
                 st.session_state["journey_data"] = all_journey
                 st.session_state["journey_stuck_ids"] = all_stuck_ids
+                st.session_state["journey_design_ids"] = [d["design_id"] for d in designs]
 
         if "journey_data" in st.session_state:
             total_stuck = len(st.session_state["journey_stuck_ids"])
@@ -534,6 +535,43 @@ with main_tab3:
 
                     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
+                    # Job worker report
+                    st.markdown("##### 👷 Job Worker Report")
+                    jw_data = run_query("""
+                        SELECT 
+                            dc.name as department,
+                            jw.name as job_worker,
+                            jwr.role_name as role,
+                            SUM(vad.issued_quantity) as total_issued,
+                            SUM(COALESCE(vad.received_quantity, 0)) as total_received,
+                            SUM(vad.issued_quantity - COALESCE(vad.received_quantity, 0)) as qty_not_returned
+                        FROM vendor_assignment va
+                        JOIN vendor_assignment_details vad ON vad.assignment_id = va.assignment_id
+                        JOIN job_workers jw ON jw.job_worker_id = vad.job_worker_id
+                        JOIN job_worker_role jwr ON jwr.id = jw.role_id
+                        JOIN design_department_tracking ddt ON ddt.tracking_id = va.tracking_id
+                        JOIN departments dc ON dc.department_id = ddt.current_department_id
+                        WHERE ddt.design_id = %s
+                        GROUP BY dc.name, jw.name, jwr.role_name
+                        ORDER BY dc.name, qty_not_returned DESC
+                    """, (design["design_id"],))
+
+                    if jw_data:
+                        jw_rows = []
+                        for row in jw_data:
+                            not_returned = int(row["qty_not_returned"] or 0)
+                            jw_rows.append({
+                                "Department": row["department"],
+                                "Job Worker": row["job_worker"],
+                                "Role": row["role"],
+                                "Issued": row["total_issued"],
+                                "Received Back": row["total_received"],
+                                "Not Returned": f"⚠️ {not_returned}" if not_returned > 0 else "✅ 0"
+                            })
+                        st.dataframe(pd.DataFrame(jw_rows), use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No job worker assignment data found for this design.")
+
                     if stuck:
                         st.error(f"🔴 Stuck at: **{', '.join(s['current_dept'] for s in stuck)}**")
                     else:
@@ -542,25 +580,79 @@ with main_tab3:
             # Fix section
             if total_stuck > 0:
                 st.markdown("---")
-                st.markdown(f"### Fix — {total_stuck} stuck tracking record(s) found across all designs above")
-                st.warning("⚠️ Only proceed after confirming with the customer that all departments have physically completed their work.")
-                confirm_journey = st.checkbox(
-                    "I confirm the customer has verified all departments are physically complete",
-                    key="journey_confirm"
-                )
-                if confirm_journey and st.button("✅ Mark All Stuck Records as Completed", type="primary", key="journey_fix_btn"):
-                    try:
-                        ids = st.session_state["journey_stuck_ids"]
-                        id_ph = ", ".join(["%s"] * len(ids))
-                        affected = run_query(
-                            f"UPDATE design_department_tracking SET status_id = 2 WHERE tracking_id IN ({id_ph})",
-                            tuple(ids), fetch=False
-                        )
-                        st.success(f"✅ {affected} tracking records marked as COMPLETED. Designs should now show correctly in the app.")
-                        st.session_state.pop("journey_data", None)
-                        st.session_state.pop("journey_stuck_ids", None)
-                    except Exception as e:
-                        st.error(f"Error: {e}")
+                st.markdown(f"### Fix — {total_stuck} stuck tracking record(s) found")
+                st.info("Choose how to fix based on what the customer tells you.")
+
+                fix_col1, fix_col2 = st.columns(2)
+
+                with fix_col1:
+                    st.markdown("#### ✅ Option A — Mark All Complete")
+                    st.caption("Use when: pieces were actually processed but qty was entered wrong. All pieces exist physically.")
+                    confirm_a = st.checkbox("I confirm all departments have physically completed their work", key="journey_confirm_a")
+                    if confirm_a and st.button("✅ Mark All as Completed", type="primary", key="journey_fix_btn_a"):
+                        try:
+                            ids = st.session_state["journey_stuck_ids"]
+                            id_ph = ", ".join(["%s"] * len(ids))
+                            affected = run_query(
+                                f"UPDATE design_department_tracking SET status_id = 2 WHERE tracking_id IN ({id_ph})",
+                                tuple(ids), fetch=False
+                            )
+                            st.success(f"✅ {affected} records marked as COMPLETED. Designs will move out of Tasks in all departments.")
+                            st.session_state.pop("journey_data", None)
+                            st.session_state.pop("journey_stuck_ids", None)
+                            st.session_state.pop("journey_design_ids", None)
+                        except Exception as e:
+                            st.error(f"Error: {e}")
+
+                with fix_col2:
+                    st.markdown("#### ✍️ Option B — Write Off & Close")
+                    st.caption("Use when: some pieces are genuinely lost or rejected and will never be recovered. Updates order qty to match reality.")
+                    confirm_b = st.checkbox("I confirm the missing pieces are permanently lost and should be written off", key="journey_confirm_b")
+                    if confirm_b and st.button("✍️ Write Off & Close", type="primary", key="journey_fix_btn_b"):
+                        try:
+                            ids = st.session_state["journey_stuck_ids"]
+                            design_ids = st.session_state.get("journey_design_ids", [])
+
+                            # For each design, find the minimum qty that actually flowed through
+                            # (the last tracking record's qty = what actually made it through)
+                            for did in design_ids:
+                                last_qty = run_query("""
+                                    SELECT SUM(dit.quantity) as total_qty
+                                    FROM design_department_tracking ddt
+                                    JOIN design_item_tracking dit ON dit.tracking_id = ddt.tracking_id
+                                    WHERE ddt.design_id = %s
+                                    ORDER BY ddt.processed_date DESC
+                                    LIMIT 1
+                                """, (did,))
+                                # Get the minimum qty seen across all tracking steps (what actually completed)
+                                min_qty = run_query("""
+                                    SELECT MIN(step_qty) as min_qty FROM (
+                                        SELECT SUM(dit.quantity) as step_qty
+                                        FROM design_department_tracking ddt
+                                        JOIN design_item_tracking dit ON dit.tracking_id = ddt.tracking_id
+                                        WHERE ddt.design_id = %s
+                                        GROUP BY ddt.tracking_id
+                                    ) as qtys
+                                """, (did,))
+                                if min_qty and min_qty[0]["min_qty"]:
+                                    actual_qty = min_qty[0]["min_qty"]
+                                    run_query(
+                                        "UPDATE designs SET quantity = %s WHERE design_id = %s",
+                                        (actual_qty, did), fetch=False
+                                    )
+
+                            # Mark all stuck as completed
+                            id_ph = ", ".join(["%s"] * len(ids))
+                            affected = run_query(
+                                f"UPDATE design_department_tracking SET status_id = 2 WHERE tracking_id IN ({id_ph})",
+                                tuple(ids), fetch=False
+                            )
+                            st.success(f"✅ {affected} records marked as COMPLETED and order quantities updated to reflect actual processed pieces. Designs will move out of Tasks.")
+                            st.session_state.pop("journey_data", None)
+                            st.session_state.pop("journey_stuck_ids", None)
+                            st.session_state.pop("journey_design_ids", None)
+                        except Exception as e:
+                            st.error(f"Error: {e}")
             else:
                 st.success("✅ No stuck records found across all designs.")
 
