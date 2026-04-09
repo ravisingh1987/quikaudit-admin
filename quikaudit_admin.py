@@ -10,10 +10,24 @@ MONGODB_URI = st.secrets["MONGODB_URI"]
 MARIADB_URI = st.secrets["MARIADB_URI"]
 APP_PASSWORD = st.secrets["APP_PASSWORD"]
 
-ORGANIZATIONS = {
-    "Thrive Fashion Pvt. Ltd": "org_7779bed0-0aab-4508-904f-eafc3d22c8ff",
-    "Caesar Industries LLP": "org_02206976-71a2-4378-b458-9139c7a124a6"
-}
+@st.cache_data(ttl=300)
+def load_organizations():
+    uri = st.secrets["MARIADB_URI"].replace("mysql+pymysql://", "")
+    user_pass, rest = uri.split("@")
+    user, password = user_pass.split(":")
+    host_db = rest.split("/")
+    host = host_db[0]
+    db = host_db[1]
+    conn = pymysql.connect(host=host, user=user, password=password, database=db, cursorclass=pymysql.cursors.DictCursor)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT org_id, name FROM organizations ORDER BY name")
+            rows = cur.fetchall()
+        return {r["name"]: r["org_id"] for r in rows}
+    finally:
+        conn.close()
+
+ORGANIZATIONS = load_organizations()
 
 COLLECTIONS = {
     "vendors":      {"field": "vendor",     "label": "Vendor Name",     "extra_fields": [{"key": "initials", "label": "Initials"}]},
