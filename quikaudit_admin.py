@@ -457,10 +457,13 @@ with main_tab3:
         if st.button("🔍 Get Journey Report", key="journey_btn") and journey_input:
             names = [n.strip() for n in journey_input.strip().splitlines() if n.strip()]
             placeholders = ", ".join(["%s"] * len(names))
+            # Build LIKE conditions for partial matching
+            like_conditions = " OR ".join(["design_name LIKE %s"] * len(names))
+            like_params = tuple(f"%{n}%" for n in names) + (org_id,)
             designs = run_query(
                 f"SELECT design_id, design_name, status, quantity FROM designs "
-                f"WHERE design_name IN ({placeholders}) AND organization_id = %s",
-                tuple(names) + (org_id,)
+                f"WHERE ({like_conditions}) AND organization_id = %s",
+                like_params
             )
             if not designs:
                 st.error("No designs found for this organisation.")
