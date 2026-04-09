@@ -367,10 +367,9 @@ with main_tab3:
     st.subheader(f"Support Tools — {org_name}")
     st.caption("Use these tools to resolve customer issues. All destructive actions require confirmation.")
 
-    st_tab1, st_tab2, st_tab3, st_tab4 = st.tabs([
+    st_tab1, st_tab2, st_tab3 = st.tabs([
         "🗑️ Delete Design",
-        "🔍 Diagnose Stuck Design",
-        "✅ Complete Departments",
+        "🔍 Design Journey & Fix",
         "📦 Create Dispatch"
     ])
 
@@ -443,126 +442,127 @@ with main_tab3:
                         except Exception as e:
                             st.error(f"Error: {e}")
 
-    # ── TOOL 2: DIAGNOSE STUCK DESIGN ─────────────────────────────────────────
+    # ── TOOL 2: DESIGN JOURNEY & FIX ──────────────────────────────────────────
     with st_tab2:
-        st.markdown("#### Diagnose Stuck Design")
-        st.caption("Trace the full department journey and find exactly where a design is stuck.")
+        st.markdown("#### Design Journey & Fix")
+        st.caption("Search one or multiple designs to see their full department journey, spot where qty is stuck, and fix all in one click.")
 
-        diag_name = st.text_input("Design Name", placeholder="e.g. 1129", key="diag_name")
+        journey_input = st.text_area(
+            "Enter Design Name(s) — one per line",
+            placeholder="1129\n1122\n4444BOTFSLKBD",
+            key="journey_input",
+            height=100
+        )
 
-        if st.button("Diagnose", key="diag_btn") and diag_name:
-            designs = run_query(
-                "SELECT design_id, design_name, status, quantity FROM designs "
-                "WHERE design_name = %s AND organization_id = %s",
-                (diag_name, org_id)
-            )
-            if not designs:
-                st.error("Design not found for this organisation.")
-            else:
-                st.session_state["diag_designs"] = designs
-
-        if "diag_designs" in st.session_state:
-            for design in st.session_state["diag_designs"]:
-                st.markdown(f"**Design:** {design['design_name']} &nbsp;|&nbsp; **Status:** {design['status']} &nbsp;|&nbsp; **Order Qty:** {design['quantity']}")
-                journey = run_query("""
-                    SELECT
-                        ddt.tracking_id,
-                        dp.name as prev_dept,
-                        dc.name as current_dept,
-                        ddt.status_id,
-                        ddt.processed_date,
-                        SUM(dit.quantity) as total_qty
-                    FROM design_department_tracking ddt
-                    LEFT JOIN departments dp ON dp.department_id = ddt.prev_department_id
-                    LEFT JOIN departments dc ON dc.department_id = ddt.current_department_id
-                    LEFT JOIN design_item_tracking dit ON dit.tracking_id = ddt.tracking_id
-                    WHERE ddt.design_id = %s
-                    GROUP BY ddt.tracking_id, dp.name, dc.name, ddt.status_id, ddt.processed_date
-                    ORDER BY ddt.processed_date ASC
-                """, (design["design_id"],))
-
-                if journey:
-                    for step in journey:
-                        icon = "✅" if step["status_id"] == 2 else "🔴"
-                        label = "COMPLETED" if step["status_id"] == 2 else "IN PROGRESS"
-                        st.markdown(
-                            f"{icon} **{step['prev_dept'] or 'START'} → {step['current_dept']}** "
-                            f"| Qty: `{step['total_qty']}` | `{label}` | "
-                            f"<span style='color:gray;font-size:12px'>{step['processed_date']}</span>",
-                            unsafe_allow_html=True
-                        )
-
-                    stuck = [s for s in journey if s["status_id"] == 1]
-                    if stuck:
-                        st.error(f"🔴 Stuck at {len(stuck)} department(s): " + ", ".join(s["current_dept"] for s in stuck))
-                    else:
-                        st.success("✅ All departments completed.")
-                else:
-                    st.info("No tracking records found.")
-
-    # ── TOOL 3: BULK COMPLETE DEPARTMENTS ─────────────────────────────────────
-    with st_tab3:
-        st.markdown("#### Mark Departments as Completed")
-        st.caption("Use when designs have physically completed a department but the app still shows them as IN PROGRESS.")
-
-        bulk_names = st.text_area("Enter Design Names (one per line)", placeholder="1129\n1122\n1133", key="bulk_complete_names")
-
-        if st.button("Find Stuck Records", key="bulk_find_btn") and bulk_names:
-            names = [n.strip() for n in bulk_names.strip().splitlines() if n.strip()]
+        if st.button("🔍 Get Journey Report", key="journey_btn") and journey_input:
+            names = [n.strip() for n in journey_input.strip().splitlines() if n.strip()]
             placeholders = ", ".join(["%s"] * len(names))
             designs = run_query(
-                f"SELECT design_id FROM designs WHERE design_name IN ({placeholders}) AND organization_id = %s",
+                f"SELECT design_id, design_name, status, quantity FROM designs "
+                f"WHERE design_name IN ({placeholders}) AND organization_id = %s",
                 tuple(names) + (org_id,)
             )
             if not designs:
-                st.error("No designs found.")
+                st.error("No designs found for this organisation.")
+                st.session_state.pop("journey_data", None)
             else:
-                design_ids = [d["design_id"] for d in designs]
-                id_ph = ", ".join(["%s"] * len(design_ids))
-                stuck = run_query(f"""
-                    SELECT
-                        d.design_name,
-                        ddt.tracking_id,
-                        dep.name as department_name,
-                        SUM(dit.quantity) as total_qty
-                    FROM design_department_tracking ddt
-                    JOIN designs d ON d.design_id = ddt.design_id
-                    JOIN departments dep ON dep.department_id = ddt.current_department_id
-                    LEFT JOIN design_item_tracking dit ON dit.tracking_id = ddt.tracking_id
-                    WHERE ddt.design_id IN ({id_ph}) AND ddt.status_id = 1
-                    GROUP BY d.design_name, ddt.tracking_id, dep.name
-                    ORDER BY d.design_name, ddt.tracking_id
-                """, tuple(design_ids))
+                # Build full journey for each design
+                all_journey = []
+                all_stuck_ids = []
+                for design in designs:
+                    journey = run_query("""
+                        SELECT
+                            ddt.tracking_id,
+                            dp.name as prev_dept,
+                            dc.name as current_dept,
+                            ddt.status_id,
+                            ddt.processed_date,
+                            SUM(dit.quantity) as total_qty
+                        FROM design_department_tracking ddt
+                        LEFT JOIN departments dp ON dp.department_id = ddt.prev_department_id
+                        LEFT JOIN departments dc ON dc.department_id = ddt.current_department_id
+                        LEFT JOIN design_item_tracking dit ON dit.tracking_id = ddt.tracking_id
+                        WHERE ddt.design_id = %s
+                        GROUP BY ddt.tracking_id, dp.name, dc.name, ddt.status_id, ddt.processed_date
+                        ORDER BY ddt.processed_date ASC
+                    """, (design["design_id"],))
+                    all_journey.append({
+                        "design": design,
+                        "journey": journey
+                    })
+                    all_stuck_ids.extend([s["tracking_id"] for s in journey if s["status_id"] == 1])
+                st.session_state["journey_data"] = all_journey
+                st.session_state["journey_stuck_ids"] = all_stuck_ids
 
-                if not stuck:
-                    st.success("✅ No stuck records found. All departments already completed.")
-                    st.session_state.pop("bulk_stuck", None)
-                else:
-                    st.session_state["bulk_stuck"] = stuck
-                    st.session_state["bulk_stuck_ids"] = [s["tracking_id"] for s in stuck]
-                    df = pd.DataFrame(stuck)
-                    st.dataframe(df, use_container_width=True)
-                    st.info(f"Found **{len(stuck)} stuck records** across {len(set(s['design_name'] for s in stuck))} designs.")
+        if "journey_data" in st.session_state:
+            total_stuck = len(st.session_state["journey_stuck_ids"])
 
-        if "bulk_stuck" in st.session_state:
-            st.warning("⚠️ Only proceed if you've confirmed with the customer that these departments have physically completed their work.")
-            confirm_bulk = st.checkbox("I confirm all these departments have physically completed their work", key="bulk_confirm")
-            if confirm_bulk and st.button("✅ Mark All as Completed", type="primary", key="bulk_complete_btn"):
-                try:
-                    ids = st.session_state["bulk_stuck_ids"]
-                    id_ph = ", ".join(["%s"] * len(ids))
-                    affected = run_query(
-                        f"UPDATE design_department_tracking SET status_id = 2 WHERE tracking_id IN ({id_ph})",
-                        tuple(ids), fetch=False
-                    )
-                    st.success(f"✅ {affected} records marked as COMPLETED.")
-                    st.session_state.pop("bulk_stuck", None)
-                    st.session_state.pop("bulk_stuck_ids", None)
-                except Exception as e:
-                    st.error(f"Error: {e}")
+            for item in st.session_state["journey_data"]:
+                design = item["design"]
+                journey = item["journey"]
+                stuck = [s for s in journey if s["status_id"] == 1]
 
-    # ── TOOL 4: CREATE DISPATCH ────────────────────────────────────────────────
-    with st_tab4:
+                with st.expander(
+                    f"{'🔴' if stuck else '✅'} {design['design_name']} | Status: {design['status']} | Order Qty: {design['quantity']} | {'⚠️ ' + str(len(stuck)) + ' stuck dept(s)' if stuck else 'All clear'}",
+                    expanded=bool(stuck)
+                ):
+                    if not journey:
+                        st.info("No tracking records found.")
+                        continue
+
+                    # Journey table
+                    rows = []
+                    prev_qty = None
+                    for step in journey:
+                        qty_diff = ""
+                        if prev_qty is not None and step["total_qty"] is not None and prev_qty is not None:
+                            diff = int(step["total_qty"]) - int(prev_qty)
+                            if diff < 0:
+                                qty_diff = f"⚠️ -{abs(diff)} lost"
+                        rows.append({
+                            "From": step["prev_dept"] or "START",
+                            "To": step["current_dept"],
+                            "Qty Transferred": step["total_qty"],
+                            "Note": qty_diff,
+                            "Status": "✅ COMPLETED" if step["status_id"] == 2 else "🔴 IN PROGRESS",
+                            "Date": str(step["processed_date"])
+                        })
+                        prev_qty = step["total_qty"]
+
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+                    if stuck:
+                        st.error(f"🔴 Stuck at: **{', '.join(s['current_dept'] for s in stuck)}**")
+                    else:
+                        st.success("✅ All departments completed for this design.")
+
+            # Fix section
+            if total_stuck > 0:
+                st.markdown("---")
+                st.markdown(f"### Fix — {total_stuck} stuck tracking record(s) found across all designs above")
+                st.warning("⚠️ Only proceed after confirming with the customer that all departments have physically completed their work.")
+                confirm_journey = st.checkbox(
+                    "I confirm the customer has verified all departments are physically complete",
+                    key="journey_confirm"
+                )
+                if confirm_journey and st.button("✅ Mark All Stuck Records as Completed", type="primary", key="journey_fix_btn"):
+                    try:
+                        ids = st.session_state["journey_stuck_ids"]
+                        id_ph = ", ".join(["%s"] * len(ids))
+                        affected = run_query(
+                            f"UPDATE design_department_tracking SET status_id = 2 WHERE tracking_id IN ({id_ph})",
+                            tuple(ids), fetch=False
+                        )
+                        st.success(f"✅ {affected} tracking records marked as COMPLETED. Designs should now show correctly in the app.")
+                        st.session_state.pop("journey_data", None)
+                        st.session_state.pop("journey_stuck_ids", None)
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+            else:
+                st.success("✅ No stuck records found across all designs.")
+
+    # ── TOOL 3: CREATE DISPATCH ────────────────────────────────────────────────
+    with st_tab3:
         st.markdown("#### Create Dispatch Records")
         st.caption("Use when designs have been physically dispatched but the app was never updated.")
 
