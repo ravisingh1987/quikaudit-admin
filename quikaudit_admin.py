@@ -435,6 +435,8 @@ with main_tab3:
                                 (selected_id,), fetch=False
                             )
                             run_query("DELETE FROM design_department_tracking WHERE design_id = %s", (selected_id,), fetch=False)
+                            run_query("DELETE FROM product_variants WHERE design_id = %s", (selected_id,), fetch=False)
+                            run_query("DELETE FROM design_ratios WHERE design_id = %s", (selected_id,), fetch=False)
                             run_query("DELETE FROM designs WHERE design_id = %s", (selected_id,), fetch=False)
                             st.success("✅ Design deleted successfully.")
                             st.session_state.pop("del_results", None)
