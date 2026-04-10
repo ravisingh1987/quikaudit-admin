@@ -130,7 +130,7 @@ if st.sidebar.button("🚪 Sign Out"):
 
 # ─── MAIN TABS ────────────────────────────────────────────────────────────────
 
-main_tab1, main_tab2, main_tab3 = st.tabs(["📦 MongoDB Master Data", "👷 Job Workers (MariaDB)", "🛠️ Support Tools"])
+main_tab1, main_tab2, main_tab3, main_tab4 = st.tabs(["📦 MongoDB Master Data", "👷 Job Workers (MariaDB)", "🛠️ Support Tools", "🧾 Purchase Management"])
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 1: MONGODB
@@ -781,3 +781,133 @@ with main_tab3:
 
                     except Exception as e:
                         st.error(f"Error: {e}")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 4: PURCHASE MANAGEMENT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+with main_tab4:
+    st.subheader(f"Purchase Management — {org_name}")
+    st.caption("Manage purchase invoices. All destructive actions require confirmation.")
+
+    pm_tab1, pm_tab2 = st.tabs(["🗑️ Delete Invoice", "🔍 View Invoice"])
+
+    # ── TOOL 1: DELETE INVOICE ────────────────────────────────────────────────
+    with pm_tab1:
+        st.markdown("#### Delete Invoice")
+        st.caption("Search by invoice number, select all or specific POs, then delete safely.")
+
+        invoice_search = st.text_input("Invoice Number", placeholder="e.g. DE/0442/25-26", key="inv_search")
+
+        if st.button("🔍 Search Invoice", key="inv_search_btn") and invoice_search:
+            purchases = run_query(
+                "SELECT purchase_id, invoice_no, po, vendor_name, purchase_date, total_qty "
+                "FROM purchases WHERE invoice_no LIKE %s AND org_id = %s "
+                "ORDER BY po, purchase_date",
+                (f"%{invoice_search}%", org_id)
+            )
+            if not purchases:
+                st.error("No invoice found.")
+                st.session_state.pop("inv_purchases", None)
+            else:
+                st.session_state["inv_purchases"] = purchases
+                st.session_state.pop("inv_selected_ids", None)
+
+        if "inv_purchases" in st.session_state:
+            purchases = st.session_state["inv_purchases"]
+
+            # Group by PO for display
+            po_list = sorted(list(set(p["po"] for p in purchases)))
+            st.markdown(f"**Found {len(purchases)} record(s) under {len(po_list)} PO(s):**")
+
+            # PO selector
+            po_options = ["All POs"] + po_list
+            selected_po = st.selectbox("Select PO to delete (or All POs)", po_options, key="inv_po_select")
+
+            # Filter based on selection
+            if selected_po == "All POs":
+                filtered_purchases = purchases
+            else:
+                filtered_purchases = [p for p in purchases if p["po"] == selected_po]
+
+            # Show filtered records
+            df = pd.DataFrame(filtered_purchases)
+            st.dataframe(df[["invoice_no", "po", "vendor_name", "purchase_date", "total_qty"]], use_container_width=True, hide_index=True)
+
+            # Check fabric transactions
+            filtered_ids = [p["purchase_id"] for p in filtered_purchases]
+            id_ph = ", ".join(["%s"] * len(filtered_ids))
+
+            fabric_count = run_query(
+                f"SELECT COUNT(*) as cnt FROM fabric_transactions ft "
+                f"JOIN purchase_entries pe ON pe.sl_no = ft.sl_no "
+                f"WHERE pe.purchase_id IN ({id_ph})",
+                tuple(filtered_ids)
+            )
+            entries_count = run_query(
+                f"SELECT COUNT(*) as cnt FROM purchase_entries WHERE purchase_id IN ({id_ph})",
+                tuple(filtered_ids)
+            )
+
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Purchase Records", len(filtered_purchases))
+            col2.metric("Purchase Entries", entries_count[0]["cnt"])
+            col3.metric("Fabric Issued", fabric_count[0]["cnt"])
+
+            if int(fabric_count[0]["cnt"]) > 0:
+                st.error(f"⛔ Cannot delete — fabric from this selection has already been issued to production ({fabric_count[0]['cnt']} transactions). Deleting would corrupt inventory records.")
+            else:
+                st.warning(f"⚠️ This will permanently delete {len(filtered_purchases)} purchase record(s) and {entries_count[0]['cnt']} entries. This cannot be undone.")
+                confirm_inv = st.checkbox(
+                    f"I confirm I want to permanently delete {'all POs' if selected_po == 'All POs' else 'PO ' + selected_po} under this invoice",
+                    key="inv_confirm"
+                )
+
+                if confirm_inv and st.button("🗑️ Delete", type="primary", key="inv_delete_btn"):
+                    try:
+                        id_ph = ", ".join(["%s"] * len(filtered_ids))
+
+                        entries_deleted = run_query(
+                            f"DELETE FROM purchase_entries WHERE purchase_id IN ({id_ph})",
+                            tuple(filtered_ids), fetch=False
+                        )
+                        purchases_deleted = run_query(
+                            f"DELETE FROM purchases WHERE purchase_id IN ({id_ph})",
+                            tuple(filtered_ids), fetch=False
+                        )
+                        st.success(f"✅ Deleted — {purchases_deleted} purchase record(s) and {entries_deleted} entries removed.")
+                        st.session_state.pop("inv_purchases", None)
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+    # ── TOOL 2: VIEW INVOICE ──────────────────────────────────────────────────
+    with pm_tab2:
+        st.markdown("#### View Invoice Details")
+        st.caption("Search and view all entries under an invoice.")
+
+        view_invoice = st.text_input("Invoice Number", placeholder="e.g. DE/0466/25-26", key="inv_view_search")
+
+        if st.button("🔍 View", key="inv_view_btn") and view_invoice:
+            results = run_query("""
+                SELECT 
+                    p.invoice_no,
+                    p.po,
+                    p.vendor_name,
+                    p.purchase_date,
+                    p.total_qty,
+                    pe.transaction_id,
+                    pe.sl_no,
+                    pe.weight,
+                    pe.created_at
+                FROM purchases p
+                JOIN purchase_entries pe ON pe.purchase_id = p.purchase_id
+                WHERE p.invoice_no LIKE %s AND p.org_id = %s
+                ORDER BY p.po, pe.sl_no
+            """, (f"%{view_invoice}%", org_id))
+
+            if not results:
+                st.error("No invoice found.")
+            else:
+                df = pd.DataFrame(results)
+                st.caption(f"Found {len(results)} entries")
+                st.dataframe(df, use_container_width=True, hide_index=True)
