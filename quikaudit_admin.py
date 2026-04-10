@@ -50,9 +50,16 @@ EMAIL_TYPE_ID = 1
 # ─── DB CONNECTIONS ───────────────────────────────────────────────────────────
 
 @st.cache_resource
+def get_audit_db():
+    client = MongoClient(MONGODB_URI)
+    return client["audit_db"]["audit_collection_new"]
+
+@st.cache_resource
 def get_mongo_db():
     client = MongoClient(MONGODB_URI)
     return client["organization_db"]
+
+
 
 def get_mariadb_conn():
     uri = MARIADB_URI.replace("mysql+pymysql://", "")
@@ -790,7 +797,7 @@ with main_tab4:
     st.subheader(f"Purchase Management — {org_name}")
     st.caption("Manage purchase invoices. All destructive actions require confirmation.")
 
-    pm_tab1, pm_tab2 = st.tabs(["🗑️ Delete Invoice", "🔍 View Invoice"])
+    pm_tab1, pm_tab2, pm_tab3 = st.tabs(["🗑️ Delete Invoice", "🔍 View Invoice", "🎨 Change Fabric Type"])
 
     # ── TOOL 1: DELETE INVOICE ────────────────────────────────────────────────
     with pm_tab1:
@@ -911,3 +918,125 @@ with main_tab4:
                 df = pd.DataFrame(results)
                 st.caption(f"Found {len(results)} entries")
                 st.dataframe(df, use_container_width=True, hide_index=True)
+
+    # ── TOOL 3: CHANGE FABRIC TYPE ────────────────────────────────────────────
+    with pm_tab3:
+        st.markdown("#### Change Fabric Type")
+        st.caption("Change fabric type for one or more lot numbers. Updates both MongoDB (inventory) and MySQL (purchase records).")
+
+        lot_input = st.text_area(
+            "Enter Lot Number(s) — one per line",
+            placeholder="FFA0834\nFFA0835\nFFA0872",
+            key="fabric_lot_input",
+            height=100
+        )
+
+        if st.button("🔍 Find Lots", key="fabric_find_btn") and lot_input:
+            lots = [l.strip() for l in lot_input.strip().splitlines() if l.strip()]
+
+            # Search MongoDB
+            audit_col = get_audit_db()
+            mongo_results = list(audit_col.aggregate([
+                {"$match": {
+                    "lot_no": {"$in": lots},
+                    "organization_id": org_id
+                }},
+                {"$group": {
+                    "_id": "$lot_no",
+                    "fabric_type": {"$first": "$fabric_type"},
+                    "count": {"$sum": 1},
+                    "total_weight": {"$sum": "$weight"}
+                }},
+                {"$sort": {"_id": 1}}
+            ]))
+
+            if not mongo_results:
+                st.error("No lots found in inventory for this organisation.")
+                st.session_state.pop("fabric_lots", None)
+            else:
+                st.session_state["fabric_lots"] = lots
+                st.session_state["fabric_mongo_results"] = mongo_results
+
+        if "fabric_mongo_results" in st.session_state:
+            st.markdown("**Lots found:**")
+            rows = []
+            for lot in st.session_state["fabric_mongo_results"]:
+                rows.append({
+                    "Lot No": lot["_id"],
+                    "Current Fabric Type": lot["fabric_type"],
+                    "Roll Count": lot["count"],
+                    "Total Weight (kg)": round(lot["total_weight"], 2)
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+            # Get available fabric types from MongoDB
+            fabric_types_col = get_mongo_db()["fabric_types"]
+            fabric_type_docs = list(fabric_types_col.find(
+                {"organization_id": org_id},
+                {"fabric_type": 1, "_id": 0}
+            ))
+            fabric_type_options = [f["fabric_type"].upper() for f in fabric_type_docs]
+
+            col1, col2 = st.columns(2)
+            with col1:
+                new_fabric_type = st.selectbox(
+                    "Select New Fabric Type",
+                    fabric_type_options,
+                    key="fabric_new_type"
+                )
+            with col2:
+                custom_type = st.text_input(
+                    "Or type custom fabric type",
+                    placeholder="e.g. LOOPKNIT",
+                    key="fabric_custom_type"
+                )
+
+            # Use custom if provided, otherwise use dropdown
+            final_fabric_type = custom_type.strip().upper() if custom_type.strip() else new_fabric_type
+
+            if final_fabric_type:
+                st.info(f"Will change fabric type to: **{final_fabric_type}**")
+
+            confirm_fabric = st.checkbox(
+                "I confirm I want to change the fabric type for all the above lots",
+                key="fabric_confirm"
+            )
+
+            if confirm_fabric and st.button("🎨 Update Fabric Type", type="primary", key="fabric_update_btn"):
+                try:
+                    lots = st.session_state["fabric_lots"]
+                    audit_col = get_audit_db()
+
+                    # Update MongoDB
+                    mongo_result = audit_col.update_many(
+                        {"lot_no": {"$in": lots}, "organization_id": org_id},
+                        {"$set": {"fabric_type": final_fabric_type}}
+                    )
+
+                    # Update MySQL purchases.details for matching purchase_ids
+                    # Find purchase_ids from MongoDB results
+                    purchase_ids = list(audit_col.distinct(
+                        "purchase_id",
+                        {"lot_no": {"$in": lots}, "organization_id": org_id}
+                    ))
+
+                    mysql_affected = 0
+                    if purchase_ids:
+                        id_ph = ", ".join(["%s"] * len(purchase_ids))
+                        mysql_affected = run_query(
+                            f"UPDATE purchases SET details = %s WHERE purchase_id IN ({id_ph}) AND org_id = %s",
+                            tuple([final_fabric_type] + purchase_ids + [org_id]),
+                            fetch=False
+                        )
+
+                    st.success(
+                        f"✅ Updated successfully!\n\n"
+                        f"- MongoDB: **{mongo_result.modified_count} documents** updated\n"
+                        f"- MySQL: **{mysql_affected} purchase records** updated\n\n"
+                        f"Tell the customer to force close and reopen the app."
+                    )
+                    st.session_state.pop("fabric_lots", None)
+                    st.session_state.pop("fabric_mongo_results", None)
+
+                except Exception as e:
+                    st.error(f"Error: {e}")
