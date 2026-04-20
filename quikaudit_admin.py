@@ -797,7 +797,13 @@ with main_tab4:
     st.subheader(f"Purchase Management — {org_name}")
     st.caption("Manage purchase invoices. All destructive actions require confirmation.")
 
-    pm_tab1, pm_tab2, pm_tab3 = st.tabs(["🗑️ Delete Invoice", "🔍 View Invoice", "🎨 Change Fabric Type"])
+    pm_tab1, pm_tab2, pm_tab3, pm_tab4, pm_tab5 = st.tabs([
+        "🗑️ Delete Invoice",
+        "🔍 View Invoice",
+        "🎨 Change Fabric Type",
+        "🎨 Change Colour",
+        "💣 Force Delete Lot/Invoice"
+    ])
 
     # ── TOOL 1: DELETE INVOICE ────────────────────────────────────────────────
     with pm_tab1:
@@ -1040,3 +1046,317 @@ with main_tab4:
 
                 except Exception as e:
                     st.error(f"Error: {e}")
+
+    # ── TOOL 4: CHANGE COLOUR ─────────────────────────────────────────────────
+    with pm_tab4:
+        st.markdown("#### Change Colour of Lot")
+        st.caption("Change the colour for one or more lot numbers in inventory.")
+
+        clr_lot_input = st.text_area(
+            "Enter Lot Number(s) — one per line",
+            placeholder="FFA0834\nFFA0835",
+            key="clr_lot_input",
+            height=100
+        )
+
+        if st.button("🔍 Find Lots", key="clr_find_btn") and clr_lot_input:
+            lots = [l.strip() for l in clr_lot_input.strip().splitlines() if l.strip()]
+            audit_col = get_audit_db()
+            clr_results = list(audit_col.aggregate([
+                {"$match": {"lot_no": {"$in": lots}, "organization_id": org_id}},
+                {"$group": {
+                    "_id": "$lot_no",
+                    "current_colour": {"$first": "$clr"},
+                    "fabric_type": {"$first": "$fabric_type"},
+                    "count": {"$sum": 1}
+                }},
+                {"$sort": {"_id": 1}}
+            ]))
+
+            if not clr_results:
+                st.error("No lots found in inventory for this organisation.")
+                st.session_state.pop("clr_lots", None)
+            else:
+                st.session_state["clr_lots"] = lots
+                st.session_state["clr_results"] = clr_results
+
+        if "clr_results" in st.session_state:
+            rows = []
+            for lot in st.session_state["clr_results"]:
+                rows.append({
+                    "Lot No": lot["_id"],
+                    "Current Colour": lot["current_colour"],
+                    "Fabric Type": lot["fabric_type"],
+                    "Roll Count": lot["count"]
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+            # Get available colours from MongoDB
+            colours_col = get_mongo_db()["colors"]
+            colour_docs = list(colours_col.find(
+                {"organization_id": org_id},
+                {"color": 1, "_id": 0}
+            ))
+            colour_options = [c["color"].upper() for c in colour_docs]
+
+            col1, col2 = st.columns(2)
+            with col1:
+                new_colour = st.selectbox("Select New Colour", colour_options, key="clr_new_colour")
+            with col2:
+                custom_colour = st.text_input("Or type custom colour", placeholder="e.g. NAVY BLUE", key="clr_custom_colour")
+
+            final_colour = custom_colour.strip().upper() if custom_colour.strip() else new_colour
+
+            if final_colour:
+                st.info(f"Will change colour to: **{final_colour}**")
+
+            confirm_clr = st.checkbox("I confirm I want to change the colour for all above lots", key="clr_confirm")
+
+            if confirm_clr and st.button("🎨 Update Colour", type="primary", key="clr_update_btn"):
+                try:
+                    lots = st.session_state["clr_lots"]
+                    audit_col = get_audit_db()
+                    result = audit_col.update_many(
+                        {"lot_no": {"$in": lots}, "organization_id": org_id},
+                        {"$set": {"clr": final_colour}}
+                    )
+                    st.success(f"✅ Colour updated for **{result.modified_count} documents**. Ask customer to reopen the app.")
+                    st.session_state.pop("clr_lots", None)
+                    st.session_state.pop("clr_results", None)
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+    # ── TOOL 5: FORCE DELETE LOT/INVOICE ─────────────────────────────────────
+    with pm_tab5:
+        st.markdown("#### Force Delete Lot / Invoice")
+        st.caption("Completely wipe a lot or invoice from inventory — even if fabric has been issued. Use when fabric needs to be re-weighed and re-entered fresh.")
+
+        fd_tab1, fd_tab2 = st.tabs(["By Lot Number", "By Invoice Number"])
+
+        with fd_tab1:
+            fd_lot_input = st.text_area(
+                "Enter Lot Number(s) — one per line",
+                placeholder="FFA0834\nFFA0835",
+                key="fd_lot_input",
+                height=100
+            )
+
+            if st.button("🔍 Check Lot", key="fd_lot_find_btn") and fd_lot_input:
+                lots = [l.strip() for l in fd_lot_input.strip().splitlines() if l.strip()]
+                audit_col = get_audit_db()
+
+                # Get all sl_nos for these lots from MongoDB
+                mongo_docs = list(audit_col.find(
+                    {"lot_no": {"$in": lots}, "organization_id": org_id},
+                    {"sl_no": 1, "lot_no": 1, "clr": 1, "fabric_type": 1, "location": 1, "purchase_id": 1}
+                ))
+
+                if not mongo_docs:
+                    st.error("No lots found in inventory.")
+                    st.session_state.pop("fd_lot_data", None)
+                else:
+                    sl_nos = [d["sl_no"] for d in mongo_docs]
+                    purchase_ids = list(set(d["purchase_id"] for d in mongo_docs if d.get("purchase_id")))
+
+                    # Check fabric transactions
+                    if sl_nos:
+                        sl_ph = ", ".join(["%s"] * len(sl_nos))
+                        fabric_txns = run_query(
+                            f"SELECT transaction_id, sl_no, status, design_id FROM fabric_transactions WHERE sl_no IN ({sl_ph})",
+                            tuple(sl_nos)
+                        )
+                    else:
+                        fabric_txns = []
+
+                    issued = [t for t in fabric_txns if t["status"] == "ISSUED"]
+                    returned = [t for t in fabric_txns if t["status"] == "RETURNED"]
+
+                    st.session_state["fd_lot_data"] = {
+                        "lots": lots,
+                        "sl_nos": sl_nos,
+                        "purchase_ids": purchase_ids,
+                        "mongo_count": len(mongo_docs),
+                        "issued_count": len(issued),
+                        "returned_count": len(returned),
+                        "fabric_txn_count": len(fabric_txns)
+                    }
+
+            if "fd_lot_data" in st.session_state:
+                d = st.session_state["fd_lot_data"]
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Total Rolls", d["mongo_count"])
+                col2.metric("Fabric Transactions", d["fabric_txn_count"])
+                col3.metric("Currently Issued", d["issued_count"])
+                col4.metric("Returned", d["returned_count"])
+
+                if d["issued_count"] > 0:
+                    st.warning(f"⚠️ {d['issued_count']} roll(s) are currently issued to departments. All issuance records will also be deleted.")
+
+                st.error("🚨 This will permanently delete ALL records for these lots from inventory, purchase entries, and fabric transactions. This cannot be undone.")
+
+                confirm_fd1 = st.checkbox("I understand this is permanent and the fabric will need to be re-entered fresh", key="fd_lot_confirm1")
+                confirm_fd2 = st.checkbox("I confirm the customer has approved this deletion", key="fd_lot_confirm2")
+
+                if confirm_fd1 and confirm_fd2 and st.button("💣 Force Delete Lots", type="primary", key="fd_lot_delete_btn"):
+                    try:
+                        sl_nos = d["sl_nos"]
+                        purchase_ids = d["purchase_ids"]
+                        audit_col = get_audit_db()
+
+                        # Step 1 — Delete fabric transactions from MySQL
+                        ft_deleted = 0
+                        if sl_nos:
+                            sl_ph = ", ".join(["%s"] * len(sl_nos))
+                            ft_deleted = run_query(
+                                f"DELETE FROM fabric_transactions WHERE sl_no IN ({sl_ph})",
+                                tuple(sl_nos), fetch=False
+                            )
+
+                        # Step 2 — Delete purchase entries from MySQL
+                        pe_deleted = 0
+                        if sl_nos:
+                            pe_deleted = run_query(
+                                f"DELETE FROM purchase_entries WHERE sl_no IN ({sl_ph})",
+                                tuple(sl_nos), fetch=False
+                            )
+
+                        # Step 3 — Delete purchases from MySQL (only if all entries deleted)
+                        p_deleted = 0
+                        if purchase_ids:
+                            pid_ph = ", ".join(["%s"] * len(purchase_ids))
+                            # Only delete purchase if no remaining entries
+                            for pid in purchase_ids:
+                                remaining = run_query(
+                                    "SELECT COUNT(*) as cnt FROM purchase_entries WHERE purchase_id = %s",
+                                    (pid,)
+                                )
+                                if remaining[0]["cnt"] == 0:
+                                    run_query("DELETE FROM purchases WHERE purchase_id = %s", (pid,), fetch=False)
+                                    p_deleted += 1
+
+                        # Step 4 — Delete from MongoDB
+                        mongo_result = audit_col.delete_many(
+                            {"lot_no": {"$in": d["lots"]}, "organization_id": org_id}
+                        )
+
+                        st.success(
+                            f"✅ Force delete complete!\n\n"
+                            f"- Fabric transactions deleted: **{ft_deleted}**\n"
+                            f"- Purchase entries deleted: **{pe_deleted}**\n"
+                            f"- Purchase records deleted: **{p_deleted}**\n"
+                            f"- MongoDB inventory records deleted: **{mongo_result.deleted_count}**"
+                        )
+                        st.session_state.pop("fd_lot_data", None)
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+        with fd_tab2:
+            fd_inv_input = st.text_input("Invoice Number", placeholder="e.g. KT/522/25-26", key="fd_inv_input")
+
+            if st.button("🔍 Check Invoice", key="fd_inv_find_btn") and fd_inv_input:
+                purchases = run_query(
+                    "SELECT purchase_id, invoice_no, po, details, total_qty FROM purchases "
+                    "WHERE invoice_no LIKE %s AND org_id = %s",
+                    (f"%{fd_inv_input}%", org_id)
+                )
+                if not purchases:
+                    st.error("Invoice not found.")
+                    st.session_state.pop("fd_inv_data", None)
+                else:
+                    purchase_ids = [p["purchase_id"] for p in purchases]
+                    id_ph = ", ".join(["%s"] * len(purchase_ids))
+
+                    # Get all sl_nos
+                    entries = run_query(
+                        f"SELECT sl_no FROM purchase_entries WHERE purchase_id IN ({id_ph})",
+                        tuple(purchase_ids)
+                    )
+                    sl_nos = [e["sl_no"] for e in entries]
+
+                    # Check fabric transactions
+                    ft_count = 0
+                    issued_count = 0
+                    if sl_nos:
+                        sl_ph = ", ".join(["%s"] * len(sl_nos))
+                        ft_data = run_query(
+                            f"SELECT status, COUNT(*) as cnt FROM fabric_transactions WHERE sl_no IN ({sl_ph}) GROUP BY status",
+                            tuple(sl_nos)
+                        )
+                        for row in ft_data:
+                            ft_count += row["cnt"]
+                            if row["status"] == "ISSUED":
+                                issued_count += row["cnt"]
+
+                    st.session_state["fd_inv_data"] = {
+                        "purchase_ids": purchase_ids,
+                        "sl_nos": sl_nos,
+                        "purchases": purchases,
+                        "ft_count": ft_count,
+                        "issued_count": issued_count
+                    }
+
+            if "fd_inv_data" in st.session_state:
+                d = st.session_state["fd_inv_data"]
+                df = pd.DataFrame(d["purchases"])
+                st.dataframe(df[["invoice_no", "po", "details", "total_qty"]], use_container_width=True, hide_index=True)
+
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Total Rolls", len(d["sl_nos"]))
+                col2.metric("Fabric Transactions", d["ft_count"])
+                col3.metric("Currently Issued", d["issued_count"])
+
+                if d["issued_count"] > 0:
+                    st.warning(f"⚠️ {d['issued_count']} roll(s) currently issued. All issuance records will be deleted.")
+
+                st.error("🚨 This will permanently delete ALL records for this invoice. Cannot be undone.")
+
+                confirm_fi1 = st.checkbox("I understand this is permanent and fabric will need to be re-entered", key="fd_inv_confirm1")
+                confirm_fi2 = st.checkbox("I confirm the customer has approved this deletion", key="fd_inv_confirm2")
+
+                if confirm_fi1 and confirm_fi2 and st.button("💣 Force Delete Invoice", type="primary", key="fd_inv_delete_btn"):
+                    try:
+                        sl_nos = d["sl_nos"]
+                        purchase_ids = d["purchase_ids"]
+                        audit_col = get_audit_db()
+
+                        # Step 1 — Delete fabric transactions
+                        ft_deleted = 0
+                        if sl_nos:
+                            sl_ph = ", ".join(["%s"] * len(sl_nos))
+                            ft_deleted = run_query(
+                                f"DELETE FROM fabric_transactions WHERE sl_no IN ({sl_ph})",
+                                tuple(sl_nos), fetch=False
+                            )
+
+                        # Step 2 — Delete purchase entries
+                        pe_deleted = 0
+                        if purchase_ids:
+                            id_ph = ", ".join(["%s"] * len(purchase_ids))
+                            pe_deleted = run_query(
+                                f"DELETE FROM purchase_entries WHERE purchase_id IN ({id_ph})",
+                                tuple(purchase_ids), fetch=False
+                            )
+
+                        # Step 3 — Delete purchases
+                        p_deleted = 0
+                        if purchase_ids:
+                            p_deleted = run_query(
+                                f"DELETE FROM purchases WHERE purchase_id IN ({id_ph})",
+                                tuple(purchase_ids), fetch=False
+                            )
+
+                        # Step 4 — Delete from MongoDB using purchase_ids
+                        mongo_result = audit_col.delete_many(
+                            {"purchase_id": {"$in": purchase_ids}, "organization_id": org_id}
+                        )
+
+                        st.success(
+                            f"✅ Force delete complete!\n\n"
+                            f"- Fabric transactions deleted: **{ft_deleted}**\n"
+                            f"- Purchase entries deleted: **{pe_deleted}**\n"
+                            f"- Purchase records deleted: **{p_deleted}**\n"
+                            f"- MongoDB inventory records deleted: **{mongo_result.deleted_count}**"
+                        )
+                        st.session_state.pop("fd_inv_data", None)
+                    except Exception as e:
+                        st.error(f"Error: {e}")
